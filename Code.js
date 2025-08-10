@@ -390,7 +390,8 @@ function postToSlack(channel, text, thread_ts) {
 function buildAnswerBlocks(answerText, includeButtons) {
   const blocks = [];
   const text = answerText || ' ';
-  const MAX = 3000; // Slack section text limit
+  const MAX = 3000; // Slack section text limit for a single section block
+  // Split answer into multiple sections if needed
   for (let i = 0; i < text.length; i += MAX) {
     blocks.push({
       type: 'section',
@@ -398,7 +399,36 @@ function buildAnswerBlocks(answerText, includeButtons) {
     });
   }
   if (includeButtons) {
+    // Divider after answer
     blocks.push({ type: 'divider' });
+    // Hallucination warning (plain_text section)
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'plain_text',
+        text: '生成AIの返答にはハルシネーションと呼ばれる嘘が含まれている可能性があります。\nこの十分注意をして活用してください。',
+        emoji: true,
+      },
+    });
+    // Actions: What are AI hallucinations?
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':google-cloud: ハルシネーションとは？',
+            emoji: true,
+          },
+          url: 'https://cloud.google.com/discover/what-are-ai-hallucinations',
+          action_id: 'ai_hallucination_info',
+        },
+      ],
+    });
+    // Divider
+    blocks.push({ type: 'divider' });
+    // Actions row: repo + gemini web
     blocks.push({
       type: 'actions',
       elements: [
@@ -411,7 +441,6 @@ function buildAnswerBlocks(answerText, includeButtons) {
           },
           url: 'https://github.com/Shirashoji/Slack-gemini-Q_and_A',
           action_id: 'open_repo',
-          value: 'open_repo',
         },
         {
           type: 'button',
@@ -422,7 +451,22 @@ function buildAnswerBlocks(answerText, includeButtons) {
           },
           url: 'https://gemini.google.com/app',
           action_id: 'open_gemini_web',
-          value: 'open_gemini_web',
+        },
+      ],
+    });
+    // Actions row: student free + sponsor
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':mortar_board: 大学生のGemini Pro無料登録',
+            emoji: true,
+          },
+          url: 'https://goo.gle/geministudentfree_graduate-school-of-nihon-university',
+          action_id: 'student_gemini_free',
         },
         {
           type: 'button',
@@ -433,7 +477,6 @@ function buildAnswerBlocks(answerText, includeButtons) {
           },
           url: 'https://github.com/sponsors/Shirashoji',
           action_id: 'sponsor_dev',
-          value: 'sponsor_dev',
         },
       ],
     });
