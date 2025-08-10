@@ -2,7 +2,7 @@ const GEMINI_API_KEY =
   PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 const SLACK_BOT_TOKEN =
   PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN');
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=${GEMINI_API_KEY}`;
 const SLACK_POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage';
 const SLACK_UPDATE_MESSAGE_URL = 'https://slack.com/api/chat.update';
 const SLACK_REPLIES_URL = 'https://slack.com/api/conversations.replies';
@@ -125,9 +125,9 @@ function doPost(e) {
 
     logToSheet('INFO', `Parsed query: "${query}" with ${files.length} files.`);
 
-    // --- Step 1.5: Post "Please wait" and create trigger ---
+    // --- Step 1.5: Post "Please wait" and start streaming ---
     try {
-      // 先に「思考中」のメッセージを投稿
+      // 最初に「思考中」のメッセージを投稿
       const waitMsgResponse = postToSlack(channel, '思考中です...', thread_ts);
       const message_ts = waitMsgResponse ? waitMsgResponse.ts : null;
 
@@ -135,36 +135,31 @@ function doPost(e) {
         throw new Error("Failed to get message_ts for 'wait' message.");
       }
 
-      // トリガーに渡すペイロードを準備
-      const triggerPayload = {
-        question: query,
-        channel: channel,
-        thread_ts: thread_ts,
-        message_ts: message_ts, // 更新対象のメッセージTS
-        files: files, // ファイル情報を追加
-        botUserIds: botUserIds, // Bot IDリストを追加
-      };
+      // --- スレッド履歴とファイル処理 ---
+      const history = getThreadHistory(channel, thread_ts, botUserIds);
+      const filesData = processSlackFiles(files); // ファイルを処理
 
-      // トリガーを作成して非同期処理へ
-      const trigger = ScriptApp.newTrigger('triggeredGeminiHandler')
-        .timeBased()
-        .after(5000) // 5秒後に変更
-        .create();
-
-      // トリガーIDをキーにしてペイロードをキャッシュに保存
-      const cache = CacheService.getScriptCache();
-      cache.put(trigger.getUniqueId(), JSON.stringify(triggerPayload), 600);
-
-      logToSheet(
-        'INFO',
-        `Trigger ${trigger.getUniqueId()} created for channel ${channel}.`,
+      // --- Gemini API呼び出し (ストリーミング) ---
+      streamGeminiResponseToSlack(
+        query,
+        history,
+        filesData,
+        channel,
+        message_ts,
       );
     } catch (err) {
       logToSheet(
         'ERROR',
         `doPost processing error: ${err}\nStack: ${err && err.stack}`,
       );
-      // エラーが発生してもACKは返す
+      // エラーが発生した場合、待機メッセージをエラー表示に更新
+      if (message_ts) {
+        updateSlackMessage(
+          channel,
+          message_ts,
+          'エラーが発生しました。詳細はログを確認してください。',
+        );
+      }
     }
   } else {
     logToSheet('INFO', 'Event ignored (unsupported type or missing text)');
@@ -173,59 +168,132 @@ function doPost(e) {
   return ack; // Slackへは即時ACK
 }
 
+// --- Helper Functions ---
+
 /**
- * Step 2: Executed by the trigger a few seconds after doPost completes.
- * This function does the slow work of calling the Gemini API and posting the result.
+ * Calls the Gemini API with streaming enabled and updates the Slack message in real-time.
  */
-function triggeredGeminiHandler(e) {
-  const triggerId = e.triggerUid;
-  logToSheet('INFO', `Trigger ${triggerId} fired.`);
+function streamGeminiResponseToSlack(
+  question,
+  history,
+  filesData,
+  channel,
+  message_ts,
+) {
+  const systemInstruction = `あなたは優秀なアシスタントです。Slackのスレッドでの会話の文脈を考慮し、提供された情報（テキストや画像）に基づいて回答を生成してください。回答はSlackで表示されるため、Slack独自のMarkdown形式である「mrkdwn」を使用してフォーマットしてください。例えば、太字は *テキスト* 、リストは • のような形式です。回答の最後には、"この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。"という注意書きを必ず含めてください。`;
+
+  let parts = [];
+  if (question) {
+    parts.push({ text: question });
+  }
+  if (filesData && filesData.length > 0) {
+    parts = parts.concat(filesData);
+  }
+  if (parts.length === 0) {
+    updateSlackMessage(
+      channel,
+      message_ts,
+      '質問のテキストまたはファイルが見つかりませんでした。',
+    );
+    return;
+  }
+
+  const contents = history.concat([{ role: 'user', parts: parts }]);
+
+  const payload = {
+    contents: contents,
+    system_instruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    generation_config: {
+      temperature: 1,
+      top_k: 0,
+      top_p: 0.95,
+      max_output_tokens: 1024,
+      stop_sequences: [],
+    },
+    safety_settings: [
+      {
+        category: 'HARM_CATEGORY_HARASSMENT',
+        threshold: 'BLOCK_MEDIUM_AND_ABOVE',
+      },
+    ],
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true, // エラー時もレスポンスを取得するため
+  };
 
   try {
-    // Retrieve the event data from the cache using the trigger ID.
-    const cache = CacheService.getScriptCache();
-    const cacheKey = triggerId;
-    const cachedData = cache.get(cacheKey);
+    logToSheet('INFO', 'Sending stream request to Gemini: ' + JSON.stringify(payload));
+    const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
+    const responseText = response.getContentText();
 
-    if (cachedData) {
-      logToSheet('INFO', `Found cached data for trigger ${triggerId}.`);
-      const { question, channel, thread_ts, message_ts, files, botUserIds } =
-        JSON.parse(cachedData);
+    // ストリームデータを手動でパース
+    const chunks = responseText.trim().split('\r\n');
+    let fullText = '';
+    let buffer = '';
+    let updateCounter = 0;
+    const UPDATE_THRESHOLD = 50; // 50文字バッファが溜まったら更新
 
-      // --- スレッド履歴とファイル処理 ---
-      const history = getThreadHistory(channel, thread_ts, botUserIds);
-      const filesData = processSlackFiles(files); // ファイルを処理
+    for (const chunk of chunks) {
+      try {
+        // 各チャンクは "data: " プレフィックスを持つことがある
+        const jsonStr = chunk.replace(/^data: /, '');
+        if (!jsonStr.startsWith('{')) continue; // 不正な行をスキップ
 
-      // --- Gemini API呼び出し ---
-      const geminiResponse = getGeminiResponse(question, history, filesData);
+        const data = JSON.parse(jsonStr);
+        if (
+          data.candidates &&
+          data.candidates.content &&
+          data.candidates.content.parts &&
+          data.candidates.content.parts.text
+        ) {
+          const textPart = data.candidates.content.parts.text;
+          buffer += textPart;
 
-      // --- Slackへ返信 (メッセージを更新) ---
-      updateSlackMessage(channel, message_ts, geminiResponse);
-    } else {
-      logToSheet(
-        'ERROR',
-        `No cached data found for trigger ${triggerId}. It may have expired.`,
-      );
-    }
-  } catch (error) {
-    logToSheet(
-      'ERROR',
-      `Error in triggeredGeminiHandler: ${error.toString()}\nStack: ${error.stack}`,
-    );
-  } finally {
-    // IMPORTANT: Delete the trigger so it doesn't run again.
-    const allTriggers = ScriptApp.getProjectTriggers();
-    for (const trigger of allTriggers) {
-      if (trigger.getUniqueId() === triggerId) {
-        ScriptApp.deleteTrigger(trigger);
-        logToSheet('INFO', `Trigger ${triggerId} deleted.`);
-        break;
+          // バッファが閾値を超えたらSlackメッセージを更新
+          if (buffer.length >= UPDATE_THRESHOLD) {
+            fullText += buffer;
+            buffer = '';
+            updateSlackMessage(channel, message_ts, fullText + '...'); // 更新中であることがわかるように
+            updateCounter++;
+          }
+        }
+      } catch (e) {
+        logToSheet('WARN', `Error parsing a stream chunk: ${e}. Chunk: ${chunk}`);
       }
     }
+
+    // 残りのバッファを最終テキストに追加
+    fullText += buffer;
+
+    // 最終的なメッセージで更新
+    if (fullText) {
+      updateSlackMessage(channel, message_ts, fullText);
+    } else {
+      // 有効なテキストが何も得られなかった場合
+      logToSheet('ERROR', 'No valid text received from Gemini stream. Response: ' + responseText);
+      let errorMessage = 'Geminiからの回答を正しく解析できませんでした。';
+      try {
+        const errorJson = JSON.parse(responseText);
+        if (errorJson.error && errorJson.error.message) {
+          errorMessage += `\nReason: ${errorJson.error.message}`;
+        } else if (errorJson.promptFeedback) {
+           errorMessage = `回答を生成できませんでした。入力内容が安全性ポリシーに違反している可能性があります。 (Reason: ${errorJson.promptFeedback.blockReason || 'Unknown'})`;
+        }
+      } catch(e) { /* ignore parse error */ }
+      updateSlackMessage(channel, message_ts, errorMessage);
+    }
+
+  } catch (error) {
+    logToSheet('ERROR', `Error in streamGeminiResponseToSlack: ${error.toString()}\nStack: ${error.stack}`);
+    updateSlackMessage(channel, message_ts, 'エラーが発生しました。時間をおいて再度お試しください。');
   }
 }
-
-// --- Helper Functions ---
 
 function getGeminiResponse(question, history = [], filesData = []) {
   const systemInstruction = `あなたは優秀なアシスタントです。Slackのスレッドでの会話の文脈を考慮し、提供された情報（テキストや画像）に基づいて回答を生成してください。回答はSlackで表示されるため、Slack独自のMarkdown形式である「mrkdwn」を使用してフォーマットしてください。例えば、太字は *テキスト* 、リストは • のような形式です。回答の最後には、"この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。"という注意書きを必ず含めてください。`;
