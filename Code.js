@@ -7,6 +7,8 @@ const SLACK_POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage';
 const SLACK_UPDATE_MESSAGE_URL = 'https://slack.com/api/chat.update';
 const SLACK_REPLIES_URL = 'https://slack.com/api/conversations.replies';
 const DUP_EVENT_CACHE_TTL = 600; // 秒: 同一イベントIDを保持して再処理防止 (10分)
+const DISCLAIMER_TEXT =
+  'この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。';
 
 // --- Logger Function ---
 function logToSheet(level, message) {
@@ -180,7 +182,7 @@ function streamGeminiResponseToSlack(
   channel,
   message_ts,
 ) {
-  const systemInstruction = `あなたは優秀なアシスタントです。Slackのスレッドでの会話の文脈を考慮し、提供された情報（テキストや画像）に基づいて回答を生成してください。回答はSlackで表示されるため、Slack独自のMarkdown形式である「mrkdwn」を使用してフォーマットしてください。例えば、太字は *テキスト* 、リストは • のような形式です。回答の最後には、"この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。"という注意書きを必ず含めてください。`;
+  const systemInstruction = `あなたは優秀なアシスタントです。Slackスレッドの文脈と与えられたテキスト/画像を考慮して日本語で簡潔・正確に回答してください。\n\nSlackで使用できる *mrkdwn* のサポート済み要素「のみ」を使い、未サポート記法は生成しないでください。\n[使ってよいもの]\n• 太字: *太字*\n• 斜体: _斜体_ (必要な場合のみ)\n• 打ち消し: ~打ち消し~\n• インラインコード: \`code\`\n• コードブロック: \`\`\` (言語指定は付けない)\n• 箇条書き: 行頭に • か - か数字+ピリオド (1.)\n• 引用: 行頭に >\n• リンク: <https://example.com|表示テキスト> または単純URL\n• 絵文字: :emoji_name: (標準的なもののみ)\n\n[禁止 / 生成しない]\n• 見出し記法 (#, ## など)\n• Markdown表( | と --- 区切り)\n• HTMLタグ (<div>, <span> など)\n• 脚注、数式、埋め込み画像タグ\n• 未サポートの装飾 (~~複雑な入れ子~~ 等過度な装飾)\n• 言語指定付きコードフェンス (例: \`\`\`javascript)\n\nテキストは自然な段落 (空行で区切り) を用い、不要に長い前置きは避けてください。事実が不確かなら「不確か」と明示し、推測は根拠を簡潔に述べます。\n回答末尾に必ず次の注意書きを追加してください: "${DISCLAIMER_TEXT}"`;
 
   let parts = [];
   if (question) {
