@@ -209,7 +209,6 @@ function streamGeminiResponseToSlack(
       temperature: 1,
       top_k: 0,
       top_p: 0.95,
-      max_output_tokens: 1024,
       stop_sequences: [],
     },
     safety_settings: [
@@ -228,7 +227,10 @@ function streamGeminiResponseToSlack(
   };
 
   try {
-    logToSheet('INFO', 'Sending stream request to Gemini: ' + JSON.stringify(payload));
+    logToSheet(
+      'INFO',
+      'Sending stream request to Gemini: ' + JSON.stringify(payload),
+    );
     const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
     const responseText = response.getContentText();
 
@@ -248,9 +250,13 @@ function streamGeminiResponseToSlack(
         fullText += buffer;
         buffer = '';
         // 末尾の不完全な文章を考慮し、句点や改行で区切る
-        let lastCut = Math.max(fullText.lastIndexOf('。'), fullText.lastIndexOf('\n'));
-        if (lastCut === -1) lastCut = fullText.length; else lastCut++;
-        
+        let lastCut = Math.max(
+          fullText.lastIndexOf('。'),
+          fullText.lastIndexOf('\n'),
+        );
+        if (lastCut === -1) lastCut = fullText.length;
+        else lastCut++;
+
         let textToSend = fullText.substring(0, lastCut);
         buffer = fullText.substring(lastCut) + buffer; // 残りをバッファに戻す
         fullText = textToSend;
@@ -258,13 +264,16 @@ function streamGeminiResponseToSlack(
         updateSlackMessage(channel, message_ts, fullText + '...');
       }
     }
-    
+
     fullText += buffer; // 残りのバッファを追加
 
     if (fullText) {
       updateSlackMessage(channel, message_ts, fullText);
     } else {
-      logToSheet('ERROR', 'No valid text received from Gemini stream. Response: ' + responseText);
+      logToSheet(
+        'ERROR',
+        'No valid text received from Gemini stream. Response: ' + responseText,
+      );
       let errorMessage = 'Geminiからの回答を正しく解析できませんでした。';
       try {
         // APIからの直接のエラーメッセージを抽出試行
@@ -272,15 +281,23 @@ function streamGeminiResponseToSlack(
         if (errorJson.error && errorJson.error.message) {
           errorMessage += `\nReason: ${errorJson.error.message}`;
         } else if (errorJson.promptFeedback) {
-           errorMessage = `回答を生成できませんでした。入力内容が安全性ポリシーに違反している可能性があります。 (Reason: ${errorJson.promptFeedback.blockReason || 'Unknown'})`;
+          errorMessage = `回答を生成できませんでした。入力内容が安全性ポリシーに違反している可能性があります。 (Reason: ${errorJson.promptFeedback.blockReason || 'Unknown'})`;
         }
-      } catch(e) { /* ignore parse error */ }
+      } catch (e) {
+        /* ignore parse error */
+      }
       updateSlackMessage(channel, message_ts, errorMessage);
     }
-
   } catch (error) {
-    logToSheet('ERROR', `Error in streamGeminiResponseToSlack: ${error.toString()}\nStack: ${error.stack}`);
-    updateSlackMessage(channel, message_ts, 'エラーが発生しました。時間をおいて再度お試しください。');
+    logToSheet(
+      'ERROR',
+      `Error in streamGeminiResponseToSlack: ${error.toString()}\nStack: ${error.stack}`,
+    );
+    updateSlackMessage(
+      channel,
+      message_ts,
+      'エラーが発生しました。時間をおいて再度お試しください。',
+    );
   }
 }
 
