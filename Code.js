@@ -261,7 +261,7 @@ function streamGeminiResponseToSlack(
         buffer = fullText.substring(lastCut) + buffer; // 残りをバッファに戻す
         fullText = textToSend;
 
-        updateSlackMessage(channel, message_ts, fullText + '...');
+        updateSlackMessage(channel, message_ts, fullText);
       }
     }
 
