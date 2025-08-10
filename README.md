@@ -1,226 +1,156 @@
-# (WIP) Slack Gemini Q&A Bot (Google Apps Script)
+# Slack Gemini Q&A Bot (Google Apps Script)
 
-Google Apps Script + Slack + Google Gemini (Generative Language API) を用いて、Slack 上で @メンションやメッセージに自動応答する Q&A ボットです。低レイテンシで Slack へ ACK しつつ、Gemini への遅延処理・回答更新を行えるように設計されています。
+Google Apps Script、Slack、Google Gemini APIを用いて、Slack上でスレッドの文脈や画像ファイルを理解して応答する、高機能なQ&Aボットです。
 
 ---
 
 ## 🧩 主な機能
 
-- Slack の `app_mention` / `message` イベントを取得して質問テキストを抽出
-- Google Gemini (gemini-2.5-flash) へ質問を投げ、整形した回答を生成
-- 重複イベント (Slack の再送) を 10 分間キャッシュし多重返信を防止
-- Bot 自身のメッセージを無視してループ防止
-- スプレッドシートへの簡易ログ出力 (Logs シート自動作成)
-- 失敗時はエラーログを記録してフォールバックメッセージを返却
+- **スレッドの文脈を考慮した会話機能**: スレッド内の過去のやり取り（直近10件）を理解し、文脈に沿った回答を生成します。
+- **マルチモーダル対応**: 投稿に添付された画像ファイル（JPEG, PNG, GIF, WEBP）を認識し、内容について回答できます。
+- **非同期処理による安定応答**: Slackからのリクエストには即座に「思考中...」と応答し、時間のかかるGemini APIとの通信はバックグラウンドで実行。タイムアウトを防ぎ、安定した動作を実現します。
+- **コスト管理機能**:
+    - **出力制限**: 回答の最大長を制限し、不要なコストを削減します。
+    - **入力制限**: 読み込む会話履歴の件数を制限し、入力コストを削減します。
+- **重複イベント防止**: Slackからのイベント再送による多重返信をキャッシュで防ぎます。
+- **ループ防止**: Bot自身のメッセージには応答しません。
+- **ロギング**: 実行ログやエラーをGoogleスプレッドシートに記録します。
 
 ---
 
 ## 🏗 アーキテクチャ概要
 
+本ボットは、Slackのタイムアウトを回避するため、2段階の非同期処理アーキテクチャを採用しています。
+
 ```
 Slack (Events API)
-    │  (event JSON POST)
-    ▼
-Google Apps Script WebApp (doPost)
-  - 受信 & 重複判定
-  - Gemini 呼び出し → 回答生成
-  - Slack へ投稿 or 既存メッセージ更新
+    │
+    │ 1. @メンション or メッセージ投稿 (画像含む)
     │
     ▼
-Slack チャネル / スレッド
+Google Apps Script WebApp (doPost)
+  - (高速処理)
+  - 1. Slackへ即時ACK応答 (HTTP 200)
+  - 2. 「思考中です...」とSlackに仮投稿
+  - 3. 後続処理のためのトリガーを作成
+    │
+    │ 2. トリガー発火 (5秒後)
+    │
+    ▼
+Google Apps Script (triggeredGeminiHandler)
+  - (低速処理)
+  - 1. Slackスレッド履歴・ファイルを取得
+  - 2. Gemini APIへリクエスト (文脈・画像を渡す)
+  - 3. 生成された回答で、先の「思考中です...」メッセージを更新
 ```
 
 ### 主要ファイル
 
-| ファイル          | 役割                                                                   |
-| ----------------- | ---------------------------------------------------------------------- |
-| `Code.js`         | 本体ロジック (Slack 受信、Gemini 呼び出し、Slack 投稿、重複制御、ログ) |
-| `appsscript.json` | Apps Script プロジェクト設定 (スコープ, WebApp 権限など)               |
-| `deploy.sh`       | clasp CLI を使ったデプロイスクリプト                                   |
+| ファイル | 役割 |
+| :--- | :--- |
+| `Code.js` | 本体ロジック (Slackイベント受信、非同期処理、Gemini API連携、Slack投稿) |
+| `appsscript.json` | Apps Scriptプロジェクト設定 (APIスコープ, WebApp権限など) |
+| `deploy.sh` | clasp CLIを使ったデプロイスクリプトのサンプル |
 
 ---
 
 ## 📦 必要なもの
 
-- Slack ワークスペース (アプリを作成できる権限)
-- Google アカウント (Google Apps Script / Google AI Studio 利用)
-- Google Gemini API Key (Google AI Studio で発行)
-- `clasp` (ローカルから Apps Script へ push/deploy するため、Node.js が必要)
+- Slackワークスペース (アプリを作成できる権限)
+- Googleアカウント (Google Apps Script / Google Cloud Platform利用)
+- Google Cloudプロジェクトと有効な課金アカウント
+- `clasp` (ローカル環境からデプロイする場合)
 
 ---
 
-## 🔑 Slack アプリ設定手順 (推奨)
+## 🔑 設定手順
 
-1. [Slack API: Your Apps](https://api.slack.com/apps) で新規アプリ作成 (From scratch)
-2. Basic Information > App-Level Tokens (必要なら) / Display Information を整備
-3. OAuth & Permissions:
-   - Bot Token Scopes (例):
-     - `app_mentions:read`
-     - `chat:write`
-     - `chat:write.public` (パブリックチャンネルでスレッド外投稿が必要な場合)
-     - `channels:history` (パブリックチャンネルで message イベントを扱う場合)
-     - `groups:history` (プライベートチャンネル対応が必要なら)
-     - `im:history`, `mpim:history` (DM/マルチDM対応が必要なら)
-4. Event Subscriptions を有効化:
-   - Request URL に 後述の Apps Script デプロイ URL ( https://script.google.com/macros/s/xxxxxxxx/exec ) を設定
-   - Subscribe to bot events:
-     - `app_mention`
-     - `message.channels` (または用途に応じて `message.groups` / `message.im` / `message.mpim`)
-5. Install App to Workspace → Bot User OAuth Token ( `xoxb-...` ) を取得
-6. 変更があれば再インストール / Reinstall でトークン更新
+### 1. Google Cloud Platform (GCP) でAPIキーを準備
 
----
+1.  **Google Cloudプロジェクトの選択または作成**: [Google Cloud Console](https://console.cloud.google.com/)
+2.  **APIの有効化**: `APIとサービス` > `ライブラリ`で「**Generative Language API**」を検索し、有効化します。
+3.  **APIキーの作成**: `APIとサービス` > `認証情報`でAPIキーを作成し、安全な場所に保管します。**（重要）** 本番環境では、キーにIPアドレス制限などをかけ、セキュリティを強化してください。
 
-## 🤖 Google Gemini API Key 取得
+### 2. Slack アプリの作成と設定
 
-1. [Google AI Studio](https://aistudio.google.com/) にアクセス
-2. API Key を発行
-3. 利用上限 (クォータ) を確認し、必要ならプロジェクトや課金を調整
+1.  **新規アプリ作成**: [Slack API: Your Apps](https://api.slack.com/apps) で「From scratch」からアプリを作成します。
+2.  **OAuth & Permissions**:
+    - 「Bot Token Scopes」に以下のスコープを追加します。
+      - `app_mentions:read` (Botへのメンションを読み取る)
+      - `chat:write` (メッセージを投稿・更新する)
+      - `channels:history` (パブリックチャンネルの履歴を読む)
+      - `groups:history` (プライベートチャンネルの履歴を読む)
+      - `im:history` (DMの履歴を読む)
+      - `mpim:history` (グループDMの履歴を読む)
+      - `files:read` (添付されたファイルを読む)
+3.  **アプリのインストール**: 「Install to Workspace」をクリックし、Bot User OAuth Token (`xoxb-...`) を取得します。
 
----
+### 3. Google Apps Script プロジェクトの準備
 
-## 🛠 Google Apps Script プロジェクト準備
+1.  **リポジトリの準備**: `git clone`するか、このリポジトリのファイルを元に新しいApps Scriptプロジェクトを作成します。
+2.  **claspの利用 (推奨)**:
+    ```bash
+    # claspをインストール
+    npm install -g @google/clasp
+    # Googleアカウントにログイン
+    clasp login
+    # 新規プロジェクトとして作成
+    clasp create --type webapp --title "Slack Gemini Q&A Bot" --rootDir ./
+    # または既存のプロジェクトに紐付け
+    # clasp clone <scriptId>
+    ```
+3.  **スクリプトプロパティの設定**:
+    - Apps Scriptエディタの `プロジェクト設定` > `スクリプト プロパティ` を開きます。
+    - 以下の2つのプロパティを追加します。
+      | キー | 値 |
+      | :--- | :--- |
+      | `GEMINI_API_KEY` | GCPで取得したAPIキー |
+      | `SLACK_BOT_TOKEN` | Slackから取得したBotトークン (`xoxb-...`) |
+4.  **デプロイ**:
+    ```bash
+    # clasp経由でデプロイ
+    clasp push
+    clasp deploy
+    ```
+    - デプロイ後、WebアプリのURL (`https://script.google.com/macros/s/.../exec`) が発行されます。
 
-### 1. ローカルに clone / 作業
+### 4. SlackとGASを接続
 
-```
-git clone <本リポジトリURL>
-cd Slack-gemini-Q_and_A
-```
+1.  Slackアプリ管理画面の「**Event Subscriptions**」を有効化します。
+2.  「Request URL」に、上記で取得したApps ScriptのWebアプリURLを貼り付けます。URLが検証されればOKです。
+3.  「Subscribe to bot events」で以下のイベントを購読します。
+    - `app_mention`
+    - `message.channels`
+    - `message.groups`
+    - `message.im`
+    - `message.mpim`
 
-### 2. clasp をインストール
-
-```
-npm install -g @google/clasp
-```
-
-### 3. Google ログイン & プロジェクト紐付け
-
-```
-clasp login
-clasp create --type webapp --title "Slack Gemini Q&A" --rootDir ./
-# 既存プロジェクトに紐づける場合は .clasp.json を調整
-```
-
-### 4. スクリプトプロパティ設定 (Apps Script 管理画面 > プロジェクトのプロパティ > スクリプトのプロパティ)
-
-| キー              | 値                                      |
-| ----------------- | --------------------------------------- |
-| `GEMINI_API_KEY`  | 取得した Gemini API キー                |
-| `SLACK_BOT_TOKEN` | Slack Bot User OAuth Token (`xoxb-...`) |
-
-### 5. デプロイ
-
-```
-./deploy.sh
-# または手動:
-clasp push
-clasp deploy --description "Initial"
-```
-
-### 6. Web アプリ URL を Slack の Event Subscriptions に設定
-
-- デプロイ後に表示される `https://script.google.com/macros/s/.../exec` を Slack の Request URL に貼付
-- Slack 側で Verification が成功することを確認
+これで全ての準備が完了です。SlackチャンネルにBotを招待し、メンションして話しかけてみてください。
 
 ---
 
-## ⚙ 動作フロー詳細
+## ⚙️ カスタマイズ
 
-1. Slack → WebApp に JSON POST
-2. `doPost` が: 入力ログ / JSON パース / 重複チェック / Bot 自己メッセージ除外 / テキスト整形
-3. Gemini API へプロンプト送信 (`getGeminiResponse`)
-4. Slack へ投稿 (`postToSlack`)
-5. ログはスプレッドシート `Logs` シートに追加
-
-(コードには将来的なトリガベース分割 `triggeredGeminiHandler` の雛形も含まれています。現状は同期的に Gemini を呼んでいます。長時間応答が増える場合は on-demand でトリガを作成する構造に発展可能です。)
-
----
-
-## 📝 回答フォーマット ポリシー
-
-`getGeminiResponse` 内で以下を指示:
-
-- Slack mrkdwn を使用
-- 回答の正確性に限界がある旨を案内
-- 不明確な質問には明確化を促す
-
-必要に応じてプロンプトを編集して組織ポリシーを反映して下さい。
-
----
-
-## 🧪 確認方法
-
-1. 対象チャンネルで Bot をメンション: `@your-bot 質問内容` もしくは Bot が参加するチャンネルに直接質問
-2. ログ: スプレッドシート > 拡張機能 > Apps Script > 対象プロジェクト > 実行ログ or シート `Logs`
-3. エラー時: Slack にフォールバック文言 + `Logs` シートで詳細
-
----
-
-## 🪪 セキュリティ / 運用上の注意
-
-- 現在 `appsscript.json` の `webapp.access` は `ANYONE_ANONYMOUS`。不特定アクセスを避ける場合は UI から再デプロイ時にアクセス権を制限 (例: "Only myself") し、Slack からのアクセスのみが通るかを検証してください。
-- API キーやトークンは「スクリプトプロパティ」に保存し、コードに直書きしない
-- 大量スパムを避けるには: 投稿元ユーザーやチャンネルのホワイトリスト化、レートリミット用キャッシュを追加可能
-
----
-
-## ♻ 重複イベント制御
-
-Slack は 3 秒以内に 2xx が返らないと再送することがあります。`isDuplicateSlackEvent` により `event_id` を 10 分キャッシュし同一処理を抑止しています。TTL は `DUP_EVENT_CACHE_TTL` で調整可能。
+| 目的 | 対応箇所 |
+| :--- | :--- |
+| プロンプト（Botの人格）調整 | `getGeminiResponse`関数内の`systemInstruction`文字列 |
+| 読み込む会話履歴の件数変更 | `getThreadHistory`関数内の`limit=10`の数値を変更 |
+| 回答の最大文字数（トークン）変更 | `getGeminiResponse`関数内の`max_output_tokens`の数値を変更 |
+| モデル変更 | `GEMINI_API_URL`定数のモデル名部分 (`gemini-2.5-flash`) を変更 |
+| 重複チェックのキャッシュ時間変更 | `DUP_EVENT_CACHE_TTL`定数の数値を変更（秒単位） |
 
 ---
 
 ## 🚨 トラブルシューティング
 
-| 症状                                     | 確認ポイント                                                                       |
-| ---------------------------------------- | ---------------------------------------------------------------------------------- |
-| Slack 側で Request URL Verification 失敗 | デプロイ URL が `/exec` で終わっているか / 直近で再デプロイ後 URL 変わっていないか |
-| 返信がこない                             | `Logs` シート / 実行ログ / Slack App の Event Subscriptions が有効か               |
-| 401 / authorization error                | Slack Bot Token 設定ミス / スコープ不足 / 再インストール忘れ                       |
-| Gemini エラー                            | API キー有効性 / 利用クォータ / モデル名の変更有無                                 |
-| 連続重複で返信されない                   | `event_id` がキャッシュされている (TTL 待つ or TTL 短縮)                           |
-
----
-
-## 🔍 拡張アイデア
-
-- スレッド内で逐次ストリーミング風 (placeholder → update) 実装
-- 質問分類 (タグ付け / FAQ 参照) 前処理
-- Rate limit / concurrency 制御
-- 管理用ダッシュボード (回答数 / エラー率)
-- 日本語/英語 自動判定とバイリンガル回答
-- 長文要約 / ファイル添付テキスト抽出
+| 症状 | 確認ポイント |
+| :--- | :--- |
+| Slack側でRequest URLの検証に失敗 | デプロイURLは正しいか？ `/exec`で終わっているか？ |
+| 「思考中です...」から応答が変わらない | ・GASの実行ログで`triggeredGeminiHandler`がエラーになっていないか？<br>・トリガーが作成されているか？<br>・Gemini APIキーは正しいか？ |
+| 権限エラー (Authorization error) | ・Slack Bot Tokenは正しいか？<br>・必要なスコープが全て設定されているか？<br>・スコープ変更後にアプリを再インストールしたか？ |
 
 ---
 
 ## 📄 ライセンス
 
-組織ポリシーに合わせて追記してください (例: MIT, Apache-2.0 など)。
-
----
-
-## 🙋 よくある変更点の場所
-
-| 目的               | 対応箇所                                               |
-| ------------------ | ------------------------------------------------------ |
-| プロンプト調整     | `getGeminiResponse` 内 `prompt` 文字列                 |
-| キャッシュ時間変更 | 定数 `DUP_EVENT_CACHE_TTL`                             |
-| モデル変更         | `GEMINI_API_URL` のモデル部分 (例: `gemini-2.0-flash`) |
-| ログ出力先変更     | `logToSheet` 関数                                      |
-
----
-
-## ✅ 簡易チェックリスト
-
-- [ ] Slack アプリ作成 & インストール
-- [ ] Bot Token Scopes 設定 (app_mentions:read, chat:write, ...)
-- [ ] Event Subscriptions 有効化 & URL 設定
-- [ ] スクリプトプロパティに API キー & トークン設定
-- [ ] `clasp push` / デプロイ完了
-- [ ] メンションで応答動作確認
-- [ ] ログ/エラー確認
-
----
-
-何か改善したい点があれば Issue / PR やチャットでフィードバックしてください。Happy building! 🚀
+This project is released under the  Apache License.
