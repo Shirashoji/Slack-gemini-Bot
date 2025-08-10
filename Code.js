@@ -130,7 +130,7 @@ function doPost(e) {
     // --- Step 1.5: Post "Please wait" and start streaming ---
     try {
       // 最初に「思考中」のメッセージを投稿
-      const waitMsgResponse = postToSlack(channel, '思考中です...', thread_ts);
+      const waitMsgResponse = postThinkingMessage(channel, thread_ts);
       const message_ts = waitMsgResponse ? waitMsgResponse.ts : null;
 
       if (!message_ts) {
@@ -160,6 +160,7 @@ function doPost(e) {
           channel,
           message_ts,
           'エラーが発生しました。詳細はログを確認してください。',
+          true,
         );
       }
     }
@@ -196,6 +197,7 @@ function streamGeminiResponseToSlack(
       channel,
       message_ts,
       '質問のテキストまたはファイルが見つかりませんでした。',
+      true,
     );
     return;
   }
@@ -262,15 +264,14 @@ function streamGeminiResponseToSlack(
         let textToSend = fullText.substring(0, lastCut);
         buffer = fullText.substring(lastCut) + buffer; // 残りをバッファに戻す
         fullText = textToSend;
-
-        updateSlackMessage(channel, message_ts, fullText);
+        updateSlackMessage(channel, message_ts, fullText, false);
       }
     }
 
     fullText += buffer; // 残りのバッファを追加
 
     if (fullText) {
-      updateSlackMessage(channel, message_ts, fullText);
+      updateSlackMessage(channel, message_ts, fullText, true);
     } else {
       logToSheet(
         'ERROR',
@@ -288,7 +289,7 @@ function streamGeminiResponseToSlack(
       } catch (e) {
         /* ignore parse error */
       }
-      updateSlackMessage(channel, message_ts, errorMessage);
+      updateSlackMessage(channel, message_ts, errorMessage, true);
     }
   } catch (error) {
     logToSheet(
@@ -299,6 +300,7 @@ function streamGeminiResponseToSlack(
       channel,
       message_ts,
       'エラーが発生しました。時間をおいて再度お試しください。',
+      true,
     );
   }
 }
@@ -384,8 +386,64 @@ function postToSlack(channel, text, thread_ts) {
   }
 }
 
-function updateSlackMessage(channel, ts, text) {
-  const payload = { channel: channel, ts: ts, text: text };
+// --- Block Kit Support ---
+function buildAnswerBlocks(answerText, includeButtons) {
+  const blocks = [];
+  const text = answerText || ' ';
+  const MAX = 3000; // Slack section text limit
+  for (let i = 0; i < text.length; i += MAX) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: text.substring(i, i + MAX) || ' ' },
+    });
+  }
+  if (includeButtons) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':github: このBotのソースコード',
+            emoji: true,
+          },
+          url: 'https://github.com/Shirashoji/Slack-gemini-Q_and_A',
+          action_id: 'open_repo',
+          value: 'open_repo',
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':google-gemini: GeminiをWebで使用',
+            emoji: true,
+          },
+          url: 'https://gemini.google.com/app',
+          action_id: 'open_gemini_web',
+          value: 'open_gemini_web',
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':heart: 開発者にお金をあげる',
+            emoji: true,
+          },
+          url: 'https://github.com/sponsors/Shirashoji',
+          action_id: 'sponsor_dev',
+          value: 'sponsor_dev',
+        },
+      ],
+    });
+  }
+  return blocks;
+}
+
+function postThinkingMessage(channel, thread_ts) {
+  const blocks = buildAnswerBlocks('思考中です...', false);
+  const payload = { channel, thread_ts, text: '思考中です...', blocks };
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -393,7 +451,34 @@ function updateSlackMessage(channel, ts, text) {
     payload: JSON.stringify(payload),
   };
   try {
-    logToSheet('INFO', 'Updating Slack message: ' + JSON.stringify(payload));
+    logToSheet('INFO', 'Posting thinking message (Block Kit) to Slack');
+    const response = UrlFetchApp.fetch(SLACK_POST_MESSAGE_URL, options);
+    return JSON.parse(response.getContentText());
+  } catch (e) {
+    logToSheet('ERROR', 'Failed to post thinking message: ' + e);
+    return null;
+  }
+}
+
+function updateSlackMessage(channel, ts, text, includeButtons) {
+  const blocks = buildAnswerBlocks(text, includeButtons);
+  const payload = {
+    channel: channel,
+    ts: ts,
+    text: (text || '').substring(0, 3000) || ' ', // Fallback
+    blocks: blocks,
+  };
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + SLACK_BOT_TOKEN },
+    payload: JSON.stringify(payload),
+  };
+  try {
+    logToSheet(
+      'INFO',
+      'Updating Slack message (Block Kit). length=' + (text || '').length,
+    );
     const response = UrlFetchApp.fetch(SLACK_UPDATE_MESSAGE_URL, options);
     logToSheet(
       'INFO',
