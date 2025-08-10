@@ -7,8 +7,6 @@ const SLACK_POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage';
 const SLACK_UPDATE_MESSAGE_URL = 'https://slack.com/api/chat.update';
 const SLACK_REPLIES_URL = 'https://slack.com/api/conversations.replies';
 const DUP_EVENT_CACHE_TTL = 600; // 秒: 同一イベントIDを保持して再処理防止 (10分)
-const DISCLAIMER_TEXT =
-  'この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。';
 
 // --- Logger Function ---
 function logToSheet(level, message) {
@@ -160,7 +158,6 @@ function doPost(e) {
           channel,
           message_ts,
           'エラーが発生しました。詳細はログを確認してください。',
-          true,
         );
       }
     }
@@ -182,8 +179,9 @@ function streamGeminiResponseToSlack(
   filesData,
   channel,
   message_ts,
+  root_thread_ts,
 ) {
-  const systemInstruction = `あなたは優秀なアシスタントです。Slackスレッドの文脈と与えられたテキスト/画像を考慮して日本語で簡潔・正確に回答してください。\n\nSlackで使用できる *mrkdwn* のサポート済み要素「のみ」を使い、未サポート記法は生成しないでください。\n[使ってよいもの]\n• 太字: *太字*\n• 斜体: _斜体_ (必要な場合のみ)\n• 打ち消し: ~打ち消し~\n• インラインコード: \`code\`\n• コードブロック: \`\`\` (言語指定は付けない)\n• 箇条書き: 行頭に • か - か数字+ピリオド (1.)\n• 引用: 行頭に >\n• リンク: <https://example.com|表示テキスト> または単純URL\n• 絵文字: :emoji_name: (標準的なもののみ)\n\n[禁止 / 生成しない]\n• 見出し記法 (#, ## など)\n• Markdown表( | と --- 区切り)\n• HTMLタグ (<div>, <span> など)\n• 脚注、数式、埋め込み画像タグ\n• 未サポートの装飾 (~~複雑な入れ子~~ 等過度な装飾)\n• 言語指定付きコードフェンス (例: \`\`\`javascript)\n\nテキストは自然な段落 (空行で区切り) を用い、不要に長い前置きは避けてください。事実が不確かなら「不確か」と明示し、推測は根拠を簡潔に述べます。\n回答末尾に必ず次の注意書きを追加してください: "${DISCLAIMER_TEXT}"`;
+  const systemInstruction = `あなたは優秀なアシスタントです。Slackスレッドの文脈と与えられたテキスト/画像を考慮して日本語で簡潔・正確に回答してください。\n\nSlackで使用できる *mrkdwn* のサポート済み要素「のみ」を使い、未サポート記法は生成しないでください。mrkdwnも必要な場合のみ用いてください。\n\n[使ってよいもの]\n• 太字: *太字* (*は1つ)\n• 斜体: _斜体_ \n• 打ち消し: ~打ち消し~ \n• インラインコード: \`code\`\n• コードブロック: \`\`\` (言語指定は付けない)\n• 箇条書き: 行頭に • か - か数字+ピリオド (1.)\n• 引用: 行頭に >\n• リンク: <https://example.com|表示テキスト> または単純URL\n• 絵文字: :emoji_name: (標準的なもののみ)\n\n[禁止 / 生成しない]\n• 見出し記法 (#, ## など)\n• Markdown表( | と --- 区切り)\n• HTMLタグ (<div>, <span> など)\n• 脚注、数式、埋め込み画像タグ\n• 未サポートの装飾 (~~複雑な入れ子~~ 等過度な装飾)\n• 言語指定付きコードフェンス (例: \`\`\`javascript)\n\nテキストは自然な段落 (空行で区切り) を用い、不要に長い前置きは避けてください。事実が不確かなら「不確か」と明示し、推測は根拠を簡潔に述べます。`;
 
   let parts = [];
   if (question) {
@@ -197,8 +195,8 @@ function streamGeminiResponseToSlack(
       channel,
       message_ts,
       '質問のテキストまたはファイルが見つかりませんでした。',
-      true,
     );
+    postSupplementaryBlocks(channel, root_thread_ts || message_ts);
     return;
   }
 
@@ -264,14 +262,15 @@ function streamGeminiResponseToSlack(
         let textToSend = fullText.substring(0, lastCut);
         buffer = fullText.substring(lastCut) + buffer; // 残りをバッファに戻す
         fullText = textToSend;
-        updateSlackMessage(channel, message_ts, fullText, false);
+        updateSlackMessage(channel, message_ts, fullText);
       }
     }
 
     fullText += buffer; // 残りのバッファを追加
 
     if (fullText) {
-      updateSlackMessage(channel, message_ts, fullText, true);
+      updateSlackMessage(channel, message_ts, fullText);
+      postSupplementaryBlocks(channel, root_thread_ts || message_ts);
     } else {
       logToSheet(
         'ERROR',
@@ -289,7 +288,8 @@ function streamGeminiResponseToSlack(
       } catch (e) {
         /* ignore parse error */
       }
-      updateSlackMessage(channel, message_ts, errorMessage, true);
+      updateSlackMessage(channel, message_ts, errorMessage);
+      postSupplementaryBlocks(channel, root_thread_ts || message_ts);
     }
   } catch (error) {
     logToSheet(
@@ -300,8 +300,8 @@ function streamGeminiResponseToSlack(
       channel,
       message_ts,
       'エラーが発生しました。時間をおいて再度お試しください。',
-      true,
     );
+    postSupplementaryBlocks(channel, root_thread_ts || message_ts);
   }
 }
 
@@ -387,31 +387,52 @@ function postToSlack(channel, text, thread_ts) {
 }
 
 // --- Block Kit Support ---
-function buildAnswerBlocks(answerText, includeButtons) {
-  const blocks = [];
-  const text = answerText || ' ';
-  const MAX = 3000; // Slack section text limit for a single section block
-  // Split answer into multiple sections if needed
-  for (let i = 0; i < text.length; i += MAX) {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: text.substring(i, i + MAX) || ' ' },
-    });
+// (Deprecated) buildAnswerBlocks: replaced by plain text streaming + separate supplementary blocks
+
+function postThinkingMessage(channel, thread_ts) {
+  return postToSlack(channel, '思考中です...', thread_ts);
+}
+
+function updateSlackMessage(channel, ts, text) {
+  const payload = {
+    channel: channel,
+    ts: ts,
+    text: (text || '').substring(0, 40000),
+  };
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + SLACK_BOT_TOKEN },
+    payload: JSON.stringify(payload),
+  };
+  try {
+    logToSheet(
+      'INFO',
+      'Updating Slack message (plain text) len=' + (text || '').length,
+    );
+    const response = UrlFetchApp.fetch(SLACK_UPDATE_MESSAGE_URL, options);
+    logToSheet(
+      'INFO',
+      'Response from Slack API (update): ' + response.getContentText(),
+    );
+  } catch (error) {
+    logToSheet('ERROR', `Error updating Slack message: ${error}`);
   }
-  if (includeButtons) {
-    // Divider after answer
-    blocks.push({ type: 'divider' });
-    // Hallucination warning (plain_text section)
-    blocks.push({
+}
+
+// Supplementary Block Kit (disclaimer + links)
+function buildSupplementaryBlocks() {
+  return [
+    { type: 'divider' },
+    {
       type: 'section',
       text: {
         type: 'plain_text',
-        text: '生成AIの返答にはハルシネーションと呼ばれる嘘が含まれている可能性があります。\nこの十分注意をして活用してください。',
+        text: '生成AIの返答にはハルシネーションと呼ばれる嘘が含まれている可能性があります。\nこの点に十分注意をして活用してください。',
         emoji: true,
       },
-    });
-    // Actions: What are AI hallucinations?
-    blocks.push({
+    },
+    {
       type: 'actions',
       elements: [
         {
@@ -425,11 +446,9 @@ function buildAnswerBlocks(answerText, includeButtons) {
           action_id: 'ai_hallucination_info',
         },
       ],
-    });
-    // Divider
-    blocks.push({ type: 'divider' });
-    // Actions row: repo + gemini web
-    blocks.push({
+    },
+    { type: 'divider' },
+    {
       type: 'actions',
       elements: [
         {
@@ -453,9 +472,8 @@ function buildAnswerBlocks(answerText, includeButtons) {
           action_id: 'open_gemini_web',
         },
       ],
-    });
-    // Actions row: student free + sponsor
-    blocks.push({
+    },
+    {
       type: 'actions',
       elements: [
         {
@@ -479,14 +497,13 @@ function buildAnswerBlocks(answerText, includeButtons) {
           action_id: 'sponsor_dev',
         },
       ],
-    });
-  }
-  return blocks;
+    },
+  ];
 }
 
-function postThinkingMessage(channel, thread_ts) {
-  const blocks = buildAnswerBlocks('思考中です...', false);
-  const payload = { channel, thread_ts, text: '思考中です...', blocks };
+function postSupplementaryBlocks(channel, thread_ts) {
+  const blocks = buildSupplementaryBlocks();
+  const payload = { channel, thread_ts, text: '参考リンク', blocks };
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -494,41 +511,10 @@ function postThinkingMessage(channel, thread_ts) {
     payload: JSON.stringify(payload),
   };
   try {
-    logToSheet('INFO', 'Posting thinking message (Block Kit) to Slack');
-    const response = UrlFetchApp.fetch(SLACK_POST_MESSAGE_URL, options);
-    return JSON.parse(response.getContentText());
+    logToSheet('INFO', 'Posting supplementary Block Kit message');
+    UrlFetchApp.fetch(SLACK_POST_MESSAGE_URL, options);
   } catch (e) {
-    logToSheet('ERROR', 'Failed to post thinking message: ' + e);
-    return null;
-  }
-}
-
-function updateSlackMessage(channel, ts, text, includeButtons) {
-  const blocks = buildAnswerBlocks(text, includeButtons);
-  const payload = {
-    channel: channel,
-    ts: ts,
-    text: (text || '').substring(0, 3000) || ' ', // Fallback
-    blocks: blocks,
-  };
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: 'Bearer ' + SLACK_BOT_TOKEN },
-    payload: JSON.stringify(payload),
-  };
-  try {
-    logToSheet(
-      'INFO',
-      'Updating Slack message (Block Kit). length=' + (text || '').length,
-    );
-    const response = UrlFetchApp.fetch(SLACK_UPDATE_MESSAGE_URL, options);
-    logToSheet(
-      'INFO',
-      'Response from Slack API (update): ' + response.getContentText(),
-    );
-  } catch (error) {
-    logToSheet('ERROR', `Error updating Slack message: ${error}`);
+    logToSheet('ERROR', 'Failed to post supplementary blocks: ' + e);
   }
 }
 
