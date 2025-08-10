@@ -1,0 +1,8 @@
+# .gitignore for Google Apps Script projects using https://www.npmjs.com/package/google-apps-script
+.gas/local.json
+.gas/remote.json
+gas-include/*
+.clasp.json
+
+# よくわからんので、とりあえず全部のJSONファイルを無視する
+*.json
