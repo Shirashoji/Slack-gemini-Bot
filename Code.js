@@ -33,29 +33,54 @@ function logToSheet(level, message) {
  * and returns a 200 OK to Slack immediately to prevent timeouts and retries.
  */
 function doPost(e) {
-  // 受信内容ログ
+  // --- 受信生データ簡易ログ (できるだけ軽量) ---
+  const raw = e && e.postData && e.postData.contents;
   try {
-    logToSheet(
-      "INFO",
-      `Raw doPost payload: ${e && e.postData && e.postData.contents}`,
-    );
+    console.log("Raw doPost payload:", raw && raw.substring(0, 500));
   } catch (_) {}
+
+  // Slack が要求する URL Verification に最優先で応答できるよう最初に処理
+  // Slack 仕様: body に { type: 'url_verification', challenge: 'xxxx' }
+  // パース失敗時も challenge を単純抽出するフォールバック
+  if (raw && raw.indexOf("challenge") !== -1) {
+    try {
+      const tmp = JSON.parse(raw);
+      if (tmp && tmp.type === "url_verification" && tmp.challenge) {
+        // ここではシートアクセスを避け超高速応答
+        console.log("Responding to Slack URL verification challenge");
+        return ContentService.createTextOutput(tmp.challenge).setMimeType(
+          ContentService.MimeType.TEXT,
+        );
+      }
+    } catch (e2) {
+      // フォールバック: 正規表現で challenge 文字列を拾う (念のため)
+      try {
+        const m = raw.match(/"challenge"\s*:\s*"([^"]+)"/);
+        if (m && m[1]) {
+          console.log("Fallback regex challenge extraction success");
+          return ContentService.createTextOutput(m[1]).setMimeType(
+            ContentService.MimeType.TEXT,
+          );
+        }
+      } catch (_) {}
+    }
+  }
 
   // まずSlackへ即時ACKするための空JSONレスポンスを先に準備
   var ack = ContentService.createTextOutput("{}").setMimeType(
     ContentService.MimeType.JSON,
   );
 
-  if (!e || !e.postData || !e.postData.contents) {
+  if (!raw) {
     logToSheet("ERROR", "No postData.contents in request");
     return ack;
   }
 
   var json;
   try {
-    json = JSON.parse(e.postData.contents);
+    json = JSON.parse(raw);
   } catch (parseErr) {
-    logToSheet("ERROR", `JSON parse error: ${parseErr}`);
+    logToSheet("ERROR", `JSON parse error (non-challenge): ${parseErr}`);
     return ack;
   }
 
@@ -71,14 +96,6 @@ function doPost(e) {
     }
   } catch (dupErr) {
     logToSheet("ERROR", `Duplicate check error: ${dupErr}`);
-  }
-
-  // SlackのURL検証 (Events API) challenge
-  if (json.challenge) {
-    logToSheet("INFO", "Responding to Slack URL verification challenge");
-    return ContentService.createTextOutput(json.challenge).setMimeType(
-      ContentService.MimeType.TEXT,
-    );
   }
 
   // Bot自身のメッセージは無視 (ループ防止)
