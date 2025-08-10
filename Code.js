@@ -57,9 +57,9 @@ function doPost(e) {
       // フォールバック: 正規表現で challenge 文字列を拾う (念のため)
       try {
         const m = raw.match(/"challenge"\s*:\s*"([^"]+)"/);
-        if (m && m[1]) {
+        if (m && m) {
           console.log('Fallback regex challenge extraction success');
-          return ContentService.createTextOutput(m[1]).setMimeType(
+          return ContentService.createTextOutput(m).setMimeType(
             ContentService.MimeType.TEXT,
           );
         }
@@ -224,7 +224,7 @@ function streamGeminiResponseToSlack(
     method: 'post',
     contentType: 'application/json',
     payload: JSON.stringify(payload),
-    muteHttpExceptions: true, // エラー時もレスポンスを取得するため
+    muteHttpExceptions: true,
   };
 
   try {
@@ -232,53 +232,42 @@ function streamGeminiResponseToSlack(
     const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
     const responseText = response.getContentText();
 
-    // ストリームデータを手動でパース
-    const chunks = responseText.trim().split('\r\n');
+    // ストリームデータを正規表現でパース
+    const textRegex = /"text"\s*:\s*"((?:\\"|[^"])*)"/g;
+    let match;
     let fullText = '';
     let buffer = '';
-    let updateCounter = 0;
-    const UPDATE_THRESHOLD = 50; // 50文字バッファが溜まったら更新
+    const UPDATE_THRESHOLD = 30; // 更新頻度を少し上げる
 
-    for (const chunk of chunks) {
-      try {
-        // 各チャンクは "data: " プレフィックスを持つことがある
-        const jsonStr = chunk.replace(/^data: /, '');
-        if (!jsonStr.startsWith('{')) continue; // 不正な行をスキップ
+    while ((match = textRegex.exec(responseText)) !== null) {
+      // JSON文字列内のエスケープ文字（\" や \\ など）を元に戻す
+      const textPart = JSON.parse(`"${match[1]}"`);
+      buffer += textPart;
 
-        const data = JSON.parse(jsonStr);
-        if (
-          data.candidates &&
-          data.candidates.content &&
-          data.candidates.content.parts &&
-          data.candidates.content.parts.text
-        ) {
-          const textPart = data.candidates.content.parts.text;
-          buffer += textPart;
+      if (buffer.length >= UPDATE_THRESHOLD) {
+        fullText += buffer;
+        buffer = '';
+        // 末尾の不完全な文章を考慮し、句点や改行で区切る
+        let lastCut = Math.max(fullText.lastIndexOf('。'), fullText.lastIndexOf('\n'));
+        if (lastCut === -1) lastCut = fullText.length; else lastCut++;
+        
+        let textToSend = fullText.substring(0, lastCut);
+        buffer = fullText.substring(lastCut) + buffer; // 残りをバッファに戻す
+        fullText = textToSend;
 
-          // バッファが閾値を超えたらSlackメッセージを更新
-          if (buffer.length >= UPDATE_THRESHOLD) {
-            fullText += buffer;
-            buffer = '';
-            updateSlackMessage(channel, message_ts, fullText + '...'); // 更新中であることがわかるように
-            updateCounter++;
-          }
-        }
-      } catch (e) {
-        logToSheet('WARN', `Error parsing a stream chunk: ${e}. Chunk: ${chunk}`);
+        updateSlackMessage(channel, message_ts, fullText + '...');
       }
     }
+    
+    fullText += buffer; // 残りのバッファを追加
 
-    // 残りのバッファを最終テキストに追加
-    fullText += buffer;
-
-    // 最終的なメッセージで更新
     if (fullText) {
       updateSlackMessage(channel, message_ts, fullText);
     } else {
-      // 有効なテキストが何も得られなかった場合
       logToSheet('ERROR', 'No valid text received from Gemini stream. Response: ' + responseText);
       let errorMessage = 'Geminiからの回答を正しく解析できませんでした。';
       try {
+        // APIからの直接のエラーメッセージを抽出試行
         const errorJson = JSON.parse(responseText);
         if (errorJson.error && errorJson.error.message) {
           errorMessage += `\nReason: ${errorJson.error.message}`;
@@ -292,95 +281,6 @@ function streamGeminiResponseToSlack(
   } catch (error) {
     logToSheet('ERROR', `Error in streamGeminiResponseToSlack: ${error.toString()}\nStack: ${error.stack}`);
     updateSlackMessage(channel, message_ts, 'エラーが発生しました。時間をおいて再度お試しください。');
-  }
-}
-
-function getGeminiResponse(question, history = [], filesData = []) {
-  const systemInstruction = `あなたは優秀なアシスタントです。Slackのスレッドでの会話の文脈を考慮し、提供された情報（テキストや画像）に基づいて回答を生成してください。回答はSlackで表示されるため、Slack独自のMarkdown形式である「mrkdwn」を使用してフォーマットしてください。例えば、太字は *テキスト* 、リストは • のような形式です。回答の最後には、"この回答はGoogle Geminiによって生成されており、不正確な場合があります。不明な点は講師にご質問ください。"という注意書きを必ず含めてください。`;
-
-  let parts = [];
-  // ユーザーの現在の質問(テキスト)を追加
-  if (question) {
-    parts.push({ text: question });
-  }
-  // 処理されたファイル(画像)を追加
-  if (filesData && filesData.length > 0) {
-    parts = parts.concat(filesData);
-  }
-  // テキストもファイルもない場合はエラー
-  if (parts.length === 0) {
-    return '質問のテキストまたはファイルが見つかりませんでした。';
-  }
-
-  // 履歴と今回の発言を結合
-  const contents = history.concat([{ role: 'user', parts: parts }]);
-
-  const payload = {
-    contents: contents,
-    system_instruction: {
-      parts: [{ text: systemInstruction }],
-    },
-    generation_config: {
-      temperature: 1,
-      top_k: 0,
-      top_p: 0.95,
-      max_output_tokens: 1024, // Slackの文字数上限(msg_too_long)エラー対策でさらに制限
-      stop_sequences: [],
-    },
-    safety_settings: [
-      // 安全性設定は要件に応じて調整
-      {
-        category: 'HARM_CATEGORY_HARASSMENT',
-        threshold: 'BLOCK_MEDIUM_AND_ABOVE',
-      },
-    ],
-  };
-
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-  };
-
-  try {
-    logToSheet(
-      'INFO',
-      'Sending request to Gemini API: ' + JSON.stringify(payload, null, 2),
-    );
-    const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
-    const responseText = response.getContentText();
-    logToSheet('INFO', 'Received response from Gemini API: ' + responseText);
-    const data = JSON.parse(responseText);
-
-    if (
-      data.candidates &&
-      data.candidates.length > 0 &&
-      data.candidates[0].content &&
-      data.candidates[0].content.parts &&
-      data.candidates[0].content.parts.length > 0
-    ) {
-      return data.candidates[0].content.parts[0].text;
-    } else if (data.promptFeedback) {
-      // プロンプトフィードバックがある場合 (ブロックされたなど)
-      logToSheet(
-        'WARN',
-        'Gemini API prompt feedback: ' +
-          JSON.stringify(data.promptFeedback, null, 2),
-      );
-      return `回答を生成できませんでした。入力内容が安全性ポリシーに違反している可能性があります。 (Reason: ${data.promptFeedback.blockReason || 'Unknown'})`;
-    } else {
-      logToSheet(
-        'ERROR',
-        'Invalid Gemini API response format: ' + responseText,
-      );
-      return 'Geminiからの回答を正しく解析できませんでした。';
-    }
-  } catch (error) {
-    logToSheet(
-      'ERROR',
-      `Error fetching from Gemini API: ${error.toString()}\nStack: ${error.stack}`,
-    );
-    return 'エラーが発生しました。時間をおいて再度お試しください。';
   }
 }
 
@@ -405,7 +305,10 @@ function getThreadHistory(channel, thread_ts, botUserIds = []) {
         `Fetched ${json.messages.length} messages from thread.`,
       );
       // Gemini APIの 'contents' 形式に変換
-      return json.messages
+      // 最後のメッセージ（現在の質問）は履歴に含めない
+      const messages = json.messages.slice(0, -1);
+
+      return messages
         .map((msg) => {
           const isBot =
             (msg.bot_id && msg.bot_id !== null) ||
