@@ -71,7 +71,29 @@ Slack チャネル / スレッド
 
 ---
 
+## ☁️ Google Cloud Platform (GCP) 設定
+
+Gemini API を安定して利用するために、Google Cloud プロジェクトで API を有効化し、認証情報を設定することを推奨します。
+
+1. **Google Cloud プロジェクトの選択または作成**
+   - [Google Cloud Console](https://console.cloud.google.com/) にアクセスします。
+   - 既存のプロジェクトを選択するか、新しいプロジェクトを作成します。
+
+2. **Generative Language API の有効化**
+   - 左側のナビゲーションメニューから `APIとサービス` > `ライブラリ` を選択します。
+   - 「Generative Language API」を検索し、有効化 (Enable) します。
+   - API を有効にすると、関連する課金アカウントが紐付けられます。無料利用枠を超える場合は料金が発生するためご注意ください。
+
+3. **APIキーの作成**
+   - `APIとサービス` > `認証情報` に移動します。
+   - `認証情報を作成` > `APIキー` を選択して、新しいキーを作成します。
+   - **（重要）** 作成した API キーは、特定の IP アドレスやウェブサイトからのみ呼び出せるように**必ず制限をかけてください**。これにより、キーが漏洩した際のリスクを低減できます。
+
+---
+
 ## 🤖 Google Gemini API Key 取得
+
+上記 GCP 設定で作成した API キーを、後述のスクリプトプロパティ `GEMINI_API_KEY` として使用します。Google AI Studio で発行したキーも利用可能ですが、本番運用では GCP プロジェクトでの管理が推奨されます。
 
 1. [Google AI Studio](https://aistudio.google.com/) にアクセス
 2. API Key を発行
