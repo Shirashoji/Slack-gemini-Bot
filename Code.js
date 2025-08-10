@@ -147,9 +147,8 @@ function doPost(e) {
 
       // トリガーを作成して非同期処理へ
       const trigger = ScriptApp.newTrigger('triggeredGeminiHandler')
-        .forUser(Session.getEffectiveUser())
         .timeBased()
-        .after(1000) // 1秒後
+        .after(5000) // 5秒後に変更
         .create();
 
       // トリガーIDをキーにしてペイロードをキャッシュに保存
@@ -257,7 +256,7 @@ function getGeminiResponse(question, history = [], filesData = []) {
       temperature: 1,
       top_k: 0,
       top_p: 0.95,
-      max_output_tokens: 8192,
+      max_output_tokens: 1024, // Slackの文字数上限(msg_too_long)エラー対策でさらに制限
       stop_sequences: [],
     },
     safety_settings: [
@@ -327,7 +326,7 @@ function getThreadHistory(channel, thread_ts, botUserIds = []) {
       headers: { Authorization: 'Bearer ' + SLACK_BOT_TOKEN },
     };
     const response = UrlFetchApp.fetch(
-      `${SLACK_REPLIES_URL}?channel=${channel}&ts=${thread_ts}`,
+      `${SLACK_REPLIES_URL}?channel=${channel}&ts=${thread_ts}&limit=10`, // 直近10件の履歴に制限
       options,
     );
     const json = JSON.parse(response.getContentText());
