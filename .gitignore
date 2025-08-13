@@ -6,3 +6,6 @@ gas-include/*
 
 # よくわからんので、とりあえず全部のJSONファイルを無視する
 *.json
+
+# appsscript.jsonを除外する
+!appsscript.json
