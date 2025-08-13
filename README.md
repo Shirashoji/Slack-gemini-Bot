@@ -1,4 +1,4 @@
-# Slack Gemini Q&A Bot (Google Apps Script)
+# （WIP） Slack Gemini Q&A Bot (Google Apps Script)
 
 Google Apps Script、Slack、Google Gemini APIを用いて、Slack上でスレッドの文脈や画像ファイルを理解して応答する、高機能なQ&Aボットです。
 
