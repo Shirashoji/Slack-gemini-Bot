@@ -145,7 +145,7 @@ Google Apps Script (triggeredGeminiHandler)
 
 | 症状 | 確認ポイント |
 | :--- | :--- |
-| Slack側でRequest URLの検証に失敗 | デプロイURLは正しいか？ `/exec`で終わっているか？ |
+| Slack側でRequest URLの検証に失敗 | デプロイURLは正しいか？ 少し時間をあけてみる、Slackのページをリロードする等 |
 | 「思考中です...」から応答が変わらない | ・GASの実行ログで`triggeredGeminiHandler`がエラーになっていないか？<br>・トリガーが作成されているか？<br>・Gemini APIキーは正しいか？ |
 | 権限エラー (Authorization error) | ・Slack Bot Tokenは正しいか？<br>・必要なスコープが全て設定されているか？<br>・スコープ変更後にアプリを再インストールしたか？ |
 
